@@ -16,6 +16,7 @@ SCRAPE_MODE = os.environ.get('SCRAPE_MODE', 'live')
 class NvidiaSpider(scrapy.Spider):
     '''
     scrapy crawl nvidia
+    scrapy crawl --pdb nvidia -O data/nvidia/driver_specs/nvidia_driver_specs.json
     '''
     name = 'nvidia'
     allowed_domains = ['nvidia.com', 'www.nvidia.com', 'web.archive.org']
@@ -40,6 +41,7 @@ class NvidiaSpider(scrapy.Spider):
             f.write(response.body)
 
         default_os = 'FreeBSD x64' if 'x64' in response.url else 'FreeBSD x86'
+        yield scrapy.Request(f'file://{filename}', callback=self.parse_driver_specs)
         for driver in response.css('div.pressItem'):
             spec = {
                 'Version': 'unknown',
@@ -59,10 +61,9 @@ class NvidiaSpider(scrapy.Spider):
             release_date = spec['Release Date']
             filename = f'{BASE_PATH}/www_data/data/nvidia/driver_specs/{os}_nvidia_{version}.html'
             if pathlib.Path(filename).exists():
-                yield scrapy.Request(f'file://{filename}', callback=self.parse_driver_specs, cb_kwargs={'filename': filename})
+                yield scrapy.Request(f'file://{filename}', callback=self.parse_driver_specs, dont_filter=True)
             else:
                 yield scrapy.Request(url, callback=self.retrieve_driver_specs, errback=self.handle_errors, meta={'dont_retry': True}, cb_kwargs={'filename': filename})
-        # yield scrapy.Request('https://www.nvidia.com/object/freebsd-x86-313.18-driver', callback=self.retrieve_driver_specs, errback=self.handle_errors, cb_kwargs={'filename': filename})
             # yield {
             #     'version': version,
             #     'os': os,
@@ -71,12 +72,55 @@ class NvidiaSpider(scrapy.Spider):
             # }
         # yield scrapy.Request('https://www.nvidia.com/object/freebsd-x64-331.13-driver', callback=self.parse_driver_specs, cb_kwargs=spec)
 
-    def parse_driver_specs(self, response, filename):
-        pass
+    def parse_driver_specs(self, response):
+        archs = {
+            'x86': 'i386',
+            'x64': 'amd64',
+        }
+        spec_keys = response.css('td.contentsummaryleft::text').getall()
+        if not spec_keys:
+            spec_keys = response.css('td#contentsummaryleft h2::text').getall()
+        spec_values = response.css('td.contentsummaryright::text').getall()
+        if not spec_values:
+            spec_values = response.css('td#contentsummaryright h2::text').getall()
+        specs = {}
+        mismatches = 0
+        keys = ''
+        for idx, key in enumerate(spec_keys):
+            key = key.strip().strip(':')
+            keys += key
+            value = ''
+            while not value:
+                value = spec_values[idx+mismatches].strip()
+                if not value:
+                    mismatches += 1
+            if key:
+                specs[key] = spec_values[idx+mismatches].strip()
+            if 'Version' in keys and 'Operating System' in keys and 'Release Date' in keys:
+                break
+        os_arch = specs['Operating System'].split()
+        os = os_arch[0]
+        arch = archs[os_arch[1]]
+        series_list = response.css('div#tab2_content b::text').getall()
+        gpu_lists = response.css('div#tab2_content p::text').getall()
+        if not gpu_lists:
+            gpu_lists = response.css('div#tab2_content::text').getall()
+        for idx, series in enumerate(series_list):
+            gpus = gpu_lists[idx].split(', ')
+            for gpu in gpus:
+                yield {
+                    'os': os,
+                    'arch': arch,
+                    'version': specs['Version'],
+                    'release_date': specs['Release Date'],
+                    'series': series.replace(' Series', '').replace(' series', '').strip().strip(':'),
+                    'gpu': gpu,
+                }
 
     def retrieve_driver_specs(self, response, filename):
         with open(filename, 'wb') as f:
             f.write(response.body)
+        yield scrapy.Request(f'file://{filename}', callback=self.parse_driver_specs)
 
     def retrieve_wayback_machine_capture(self, response, filename, original_url):
         last_ts = response.json()['last_ts']
