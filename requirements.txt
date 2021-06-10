@@ -1,0 +1,9 @@
+pip
+wheel
+
+python-slugify
+scrapy
+
+ipython
+ipdb
+jupyter
