@@ -1,3 +1,4 @@
+import datetime
 import os
 import pathlib
 from urllib.parse import quote_plus
@@ -11,6 +12,10 @@ from twisted.internet.error import TimeoutError, TCPTimedOutError
 
 BASE_PATH = os.environ.get('BASE_PATH', '/home/mpizarro/devel/freebsd_graphics')
 SCRAPE_MODE = os.environ.get('SCRAPE_MODE', 'live')
+ARCHS = {
+    'x86': 'i386',
+    'x64': 'amd64',
+}
 
 
 class NvidiaSpider(scrapy.Spider):
@@ -42,6 +47,7 @@ class NvidiaSpider(scrapy.Spider):
 
         default_os = 'FreeBSD x64' if 'x64' in response.url else 'FreeBSD x86'
         yield scrapy.Request(f'file://{filename}', callback=self.parse_driver_specs)
+        unknowns_counter = 0
         for driver in response.css('div.pressItem'):
             spec = {
                 'Version': 'unknown',
@@ -49,34 +55,44 @@ class NvidiaSpider(scrapy.Spider):
                 'Release Date': 'unknown',
             }
             specs = driver.css('p::text').getall()
-            for item in specs:
-                if ':' in item:
-                    key, value = item.split(':')
-                    spec[key.strip()] = value.strip()
             url = driver.css('h4 a::attr(href)').get()
-            if url[0:2] == '//':
-                url = f'https:{url}'
-            version = spec['Version']
-            os = spec['Operating System']
-            release_date = spec['Release Date']
-            filename = f'{BASE_PATH}/www_data/data/nvidia/driver_specs/{os}_nvidia_{version}.html'
+            filename = ''
+            version = ''
+            os = ''
+            arch = ''
+            if specs == [' ']:
+                alt_specs = url.split('/')[-1].replace('_display', '').replace('_', '-').split('-')
+                if len(alt_specs) == 4:
+                    version = alt_specs[2]
+                    os = alt_specs[0].lower()
+                    arch = ARCHS[alt_specs[1]].lower()
+                elif len(alt_specs) == 2:
+                    unknowns_counter += 1
+                    version = alt_specs[1]
+                    os = alt_specs[0].lower()
+                    arch = f'unknown{unknowns_counter}'
+            else:
+                for item in specs:
+                    if ':' in item:
+                        key, value = item.split(':')
+                        spec[key.strip()] = value.strip()
+                if url[0:2] == '//':
+                    url = f'https:{url}'
+                version = spec['Version']
+                os_arch = spec['Operating System'].split()
+                os = os_arch[0].lower()
+                if os == 'freebsd':
+                    arch = ARCHS[os_arch[1]].lower()
+                else:
+                    os = 'freebsd'
+                    arch = 'amd64'
+            filename = f'{BASE_PATH}/www_data/data/nvidia/driver_specs/nvidia_{version}_{os}_{arch}.html'
             if pathlib.Path(filename).exists():
                 yield scrapy.Request(f'file://{filename}', callback=self.parse_driver_specs, dont_filter=True)
             else:
                 yield scrapy.Request(url, callback=self.retrieve_driver_specs, errback=self.handle_errors, meta={'dont_retry': True}, cb_kwargs={'filename': filename})
-            # yield {
-            #     'version': version,
-            #     'os': os,
-            #     'release_date': release_date,
-            #     'url': url,
-            # }
-        # yield scrapy.Request('https://www.nvidia.com/object/freebsd-x64-331.13-driver', callback=self.parse_driver_specs, cb_kwargs=spec)
 
     def parse_driver_specs(self, response):
-        archs = {
-            'x86': 'i386',
-            'x64': 'amd64',
-        }
         spec_keys = response.css('td.contentsummaryleft::text').getall()
         if not spec_keys:
             spec_keys = response.css('td#contentsummaryleft h2::text').getall()
@@ -100,7 +116,8 @@ class NvidiaSpider(scrapy.Spider):
                 break
         os_arch = specs['Operating System'].split()
         os = os_arch[0]
-        arch = archs[os_arch[1]]
+        arch = ARCHS[os_arch[1]]
+        release_date = datetime.datetime.strptime(specs['Release Date'], '%Y.%m.%d').isoformat() + 'Z'
         series_list = response.css('div#tab2_content b::text').getall()
         gpu_lists = response.css('div#tab2_content p::text').getall()
         if not gpu_lists:
@@ -109,12 +126,12 @@ class NvidiaSpider(scrapy.Spider):
             gpus = gpu_lists[idx].split(', ')
             for gpu in gpus:
                 yield {
-                    'os': os,
-                    'arch': arch,
-                    'version': specs['Version'],
-                    'release_date': specs['Release Date'],
                     'series': series.replace(' Series', '').replace(' series', '').strip().strip(':'),
                     'gpu': gpu,
+                    'release_date': release_date,
+                    'version': specs['Version'],
+                    'os': os,
+                    'arch': arch,
                 }
 
     def retrieve_driver_specs(self, response, filename):
